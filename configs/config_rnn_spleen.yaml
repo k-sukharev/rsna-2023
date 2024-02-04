@@ -1,0 +1,201 @@
+seed_everything:
+  _target_: lightning.seed_everything
+  seed: &seed 42
+  workers: True
+datamodule:
+  _target_: rsna_2023.datasets.MonaiDataModule
+  data_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &data_dir ../input/rsna-2023-abdominal-trauma-detection
+  seg_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &seg_dir ../temp/pixdim_6
+  temp_img_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &temp_img_dir ../temp/spleen_224
+  temp_seg_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &temp_seg_dir ../temp/spleen_224
+  lmdb_cache_dir: null
+  label_keys: &label_keys
+    - spleen_healthy
+    - spleen_low
+    - spleen_high
+    # - any_injury
+  seg_keys: &seg_keys
+    - &spleen_key spleen
+  splits_to_cache:
+    - train
+  cache_transforms:
+    _target_: monai.transforms.Compose
+    transforms: &cache_transforms
+      - _target_: monai.transforms.LoadImaged
+        keys: &img_keys
+          - &img_key image
+        reader: rsna_2023.datasets.CustomPydicomReader
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.Flipd
+        keys: *img_keys
+        spatial_axis: [1, 2]
+        lazy: False
+      - _target_: monai.transforms.LoadImaged
+        keys: *seg_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.BoundingRectd
+        keys:
+          - *spleen_key
+        bbox_key_postfix: bbox
+      - _target_: monai.apps.detection.transforms.dictionary.ConvertBoxModed
+        box_keys: &box_keys
+          - spleen_bbox
+        src_mode: xxyyzz
+        dst_mode: xyzxyz
+      - _target_: rsna_2023.transforms.ResizeBoxd
+        image_key: *img_key
+        box_keys: *box_keys
+        box_ref_image_keys:
+          - *spleen_key
+      - _target_: monai.apps.detection.transforms.dictionary.ConvertBoxModed
+        box_keys: *box_keys
+        src_mode: xyzxyz
+        dst_mode: xxyyzz
+      - _target_: rsna_2023.transforms.CropBoxd
+        box_keys: *box_keys
+        image_key: image
+        margin: 16
+        k_divisible: 1
+        mode: constant
+        constant_values: -1.0
+      - _target_: monai.transforms.Resized
+        keys: *img_keys
+        spatial_size: [224, 224, 224]
+        mode: bilinear
+        lazy: False
+      - _target_: monai.transforms.SaveImaged
+        keys: *img_keys
+        output_dir: *temp_img_dir
+        output_postfix: ''
+        resample: False
+        mode: bilinear
+        squeeze_end_dims: False
+        data_root_dir: *data_dir
+        separate_folder: False
+        print_log: False
+        allow_missing_keys: True
+  train_transforms:
+    _target_: monai.transforms.Compose
+    transforms:
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+      - _target_: monai.transforms.SelectItemsd
+        keys: &select_keys
+          - *img_key
+          - patient_id
+          - labels
+          - aortic_hu
+  val_transforms:
+    _target_: monai.transforms.Compose
+    transforms:
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+      - _target_: monai.transforms.SelectItemsd
+        keys: *select_keys
+  test_transforms:
+    _target_: monai.transforms.Compose
+    transforms: #*val_transforms
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+  seed: *seed
+  fold: ???
+  n_splits: 5
+  batch_size: 8
+  num_workers: 8
+  pin_memory: True
+model:
+  _target_: rsna_2023.models.RNNLitModel
+  _recursive_: False
+  _convert_: partial
+  net:
+    _target_: timm.create_model
+    _convert_: partial
+    model_name: resnet18d  # feature_size 1280
+    pretrained: True
+    in_chans: 3
+    num_classes: 0
+  rnn:
+    _target_: torch.nn.LSTM
+    _convert_: partial
+    hidden_size: 256  # feature_size 1280
+    num_layers: 2
+    bias: True
+    batch_first: True
+    dropout: 0
+    bidirectional: True
+    proj_size: 0
+  head:
+    _target_: torch.nn.Sequential
+    _args_:
+      - _target_: torch.nn.Linear
+        in_features: 513
+        out_features: 256
+        bias: True
+      - _target_: torch.nn.BatchNorm1d
+        num_features: 256
+        affine: True
+      - _target_: torch.nn.Dropout
+        p: 0.3
+      - _target_: torch.nn.LeakyReLU
+        negative_slope: 0.1
+      - _target_: torch.nn.Linear
+        in_features: 256
+        out_features: 3
+        bias: True
+  num_frames: 16
+  optimizer:
+    _target_: torch.optim.AdamW
+    _convert_: partial
+    lr: &lr 3.e-4
+    weight_decay: 0.01
+  scheduler_dict:
+    interval: 'step'
+  scheduler:
+    _target_: torch.optim.lr_scheduler.OneCycleLR
+    total_steps: 1000
+    max_lr: *lr
+trainer:
+  _target_: lightning.pytorch.Trainer
+  accelerator: gpu
+  accumulate_grad_batches: 5
+  callbacks:
+    - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      monitor: val_roc_auc
+      verbose: True
+      mode: max
+  deterministic: warn
+  devices: 2
+  max_epochs: 20

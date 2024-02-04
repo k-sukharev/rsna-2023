@@ -1,0 +1,170 @@
+seed_everything:
+  _target_: lightning.seed_everything
+  seed: &seed 42
+  workers: True
+datamodule:
+  _target_: rsna_2023.datasets.MonaiDataModule
+  data_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &data_dir ../input/rsna-2023-abdominal-trauma-detection
+  seg_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &seg_dir ../temp/pixdim_6
+  temp_img_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &temp_img_dir ../temp/spleen_224
+  temp_seg_dir:
+    _target_: pathlib.Path
+    _args_:
+      - &temp_seg_dir ../temp/spleen_224
+  label_keys: &label_keys
+    - spleen_healthy
+    - spleen_low
+    - spleen_high
+    # - any_injury
+  seg_keys: &seg_keys
+    - &spleen_key spleen
+  splits_to_cache:
+    - train
+  cache_transforms:
+    _target_: monai.transforms.Compose
+    transforms: &cache_transforms
+      - _target_: monai.transforms.LoadImaged
+        keys: &img_keys
+          - &img_key image
+        reader: rsna_2023.datasets.CustomPydicomReader
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.Flipd
+        keys: *img_keys
+        spatial_axis: [1, 2]
+        lazy: False
+      - _target_: monai.transforms.LoadImaged
+        keys: *seg_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.BoundingRectd
+        keys:
+          - *spleen_key
+        bbox_key_postfix: bbox
+      - _target_: monai.apps.detection.transforms.dictionary.ConvertBoxModed
+        box_keys: &box_keys
+          - spleen_bbox
+        src_mode: xxyyzz
+        dst_mode: xyzxyz
+      - _target_: rsna_2023.transforms.ResizeBoxd
+        image_key: *img_key
+        box_keys: *box_keys
+        box_ref_image_keys:
+          - *spleen_key
+      - _target_: monai.apps.detection.transforms.dictionary.ConvertBoxModed
+        box_keys: *box_keys
+        src_mode: xyzxyz
+        dst_mode: xxyyzz
+      - _target_: rsna_2023.transforms.CropBoxd
+        box_keys: *box_keys
+        image_key: image
+        margin: 16
+        k_divisible: 1
+        mode: constant
+        constant_values: -1.0
+      - _target_: monai.transforms.Resized
+        keys: *img_keys
+        spatial_size: [224, 224, 224]
+        mode: bilinear
+        lazy: False
+      - _target_: monai.transforms.SaveImaged
+        keys: *img_keys
+        output_dir: *temp_img_dir
+        output_postfix: ''
+        resample: False
+        mode: bilinear
+        squeeze_end_dims: False
+        data_root_dir: *data_dir
+        separate_folder: False
+        print_log: False
+        allow_missing_keys: True
+  train_transforms:
+    _target_: monai.transforms.Compose
+    transforms:
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+      - _target_: monai.transforms.SelectItemsd
+        keys: &select_keys
+          - *img_key
+          - patient_id
+          - labels
+          - aortic_hu
+  val_transforms:
+    _target_: monai.transforms.Compose
+    transforms:
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+      - _target_: monai.transforms.SelectItemsd
+        keys: *select_keys
+  test_transforms:
+    _target_: monai.transforms.Compose
+    transforms: #*val_transforms
+      - _target_: monai.transforms.LoadImaged
+        keys: *img_keys
+        image_only: False
+        ensure_channel_first: True
+      - _target_: monai.transforms.EnsureTyped
+        keys: *img_keys
+        data_type: tensor
+        track_meta: False
+  seed: *seed
+  fold: ???
+  n_splits: 5
+  batch_size: 4
+  num_workers: 8
+  pin_memory: True
+model:
+  _target_: rsna_2023.models.Classification3DLitModel
+  _recursive_: False
+  _convert_: partial
+  net:
+    _target_: rsna_2023.models.VideoMAEv2Wrapper
+    pth: /media/xfs/Kingston/Projects/rsna-2023/assets/vit_s_k710_dl_from_giant.pth
+  optimizer:
+    _target_: torch.optim.AdamW
+    _convert_: partial
+    lr: &lr 5.e-5
+    weight_decay: 0.05
+  scheduler_dict:
+    interval: 'step'
+  scheduler:
+    _target_: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
+    warmup_epochs: 100
+    max_epochs: 750
+    warmup_start_lr: 1.e-6
+    eta_min: 2.5e-5
+trainer:
+  _target_: lightning.pytorch.Trainer
+  accelerator: gpu
+  accumulate_grad_batches: 10
+  callbacks:
+    - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      monitor: val_log_loss
+      verbose: True
+      # save_last: True
+      mode: min
+  deterministic: warn
+  devices: 2
+  max_epochs: 15
