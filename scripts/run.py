@@ -19,7 +19,7 @@ def prepare_data(dm):
 
 @hydra.main(version_base=None, config_path='../configs', config_name='config')
 def main(cfg : DictConfig) -> None:
-    dm = instantiate(
+    instantiate(
         cfg.seed_everything
     )
     logger.info('Config:\n%s', OmegaConf.to_yaml(cfg))
